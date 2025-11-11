@@ -33,6 +33,106 @@ __global__ void basicConvolution2D(float *output, const float *input, const int 
 
 __global__ void tiledConvolution2D(float *output, const float *input, const int width, const int height, const int maskSize)
 {
+    __shared__ float tile[BLOCK_SIZE + 2 * MAX_MASK_SIZE][BLOCK_SIZE + 2 * MAX_MASK_SIZE];
+
+    int x = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int y = blockIdx.y * BLOCK_SIZE + threadIdx.y;
+
+    int maskRadius = maskSize / 2;
+
+    int sharedX = threadIdx.x + maskRadius;
+    int sharedY = threadIdx.y + maskRadius;
+
+    int inputX = x - maskRadius;
+    int inputY = y - maskRadius;
+
+    if (inputX >= 0 && inputX < width && inputY >= 0 && inputY < height)
+        tile[sharedY][sharedX] = input[inputY * width + inputX];
+    else
+        tile[sharedY][sharedX] = 0.0f;
+
+
+    if (threadIdx.x < maskRadius) {
+        int leftX = inputX - maskRadius;
+        int rightX = inputX + BLOCK_SIZE;
+
+        int leftY = inputY;
+        int rightY = inputY;
+
+        // left halo
+        if (leftX >= 0 && leftY >= 0 && leftY < height)
+            tile[sharedY][sharedX - maskRadius] = input[leftY * width + leftX];
+        else
+            tile[sharedY][sharedX - maskRadius] = 0.0f;
+
+        // right halo
+        if (rightX < width && rightY >= 0 && rightY < height)
+            tile[sharedY][sharedX + BLOCK_SIZE] = input[rightY * width + rightX];
+        else
+            tile[sharedY][sharedX + BLOCK_SIZE] = 0.0f;
+    }
+
+    if (threadIdx.y < maskRadius) {
+        int topY = inputY - maskRadius;
+        int bottomY = inputY + BLOCK_SIZE;
+
+        int topX = inputX;
+        int bottomX = inputX;
+
+        // top halo
+        if (topY >= 0 && topX >= 0 && topX < width)
+            tile[sharedY - maskRadius][sharedX] = input[topY * width + topX];
+        else
+            tile[sharedY - maskRadius][sharedX] = 0.0f;
+
+        // bottom halo
+        if (bottomY < height && bottomX >= 0 && bottomX < width)
+            tile[sharedY + BLOCK_SIZE][sharedX] = input[bottomY * width + bottomX];
+        else
+            tile[sharedY + BLOCK_SIZE][sharedX] = 0.0f;
+    }
+
+    if (threadIdx.x < maskRadius && threadIdx.y < maskRadius) {
+        // top-left
+        int tx = inputX - maskRadius;
+        int ty = inputY - maskRadius;
+        tile[sharedY - maskRadius][sharedX - maskRadius] =
+            (tx >= 0 && ty >= 0) ? input[ty * width + tx] : 0.0f;
+
+        // top-right
+        tx = inputX + BLOCK_SIZE;
+        ty = inputY - maskRadius;
+        tile[sharedY - maskRadius][sharedX + BLOCK_SIZE] =
+            (tx < width && ty >= 0) ? input[ty * width + tx] : 0.0f;
+
+        // bottom-left
+        tx = inputX - maskRadius;
+        ty = inputY + BLOCK_SIZE;
+        tile[sharedY + BLOCK_SIZE][sharedX - maskRadius] =
+            (tx >= 0 && ty < height) ? input[ty * width + tx] : 0.0f;
+
+        // bottom-right
+        tx = inputX + BLOCK_SIZE;
+        ty = inputY + BLOCK_SIZE;
+        tile[sharedY + BLOCK_SIZE][sharedX + BLOCK_SIZE] =
+            (tx < width && ty < height) ? input[ty * width + tx] : 0.0f;
+    }
+
+    __syncthreads();
+
+
+    if (x < width && y < height) {
+        float sum = 0.0f;
+
+        for (int j = -maskRadius; j <= maskRadius; j++) {
+            for (int i = -maskRadius; i <= maskRadius; i++) {
+                sum += tile[sharedY + j][sharedX + i] *
+                       c_mask[(j + maskRadius) * maskSize + (i + maskRadius)];
+            }
+        }
+
+        output[y * width + x] = sum;
+    }
 }
 
 Image convolutionOnDevice(const Image &img, const std::vector<float> &mask, ConvMethod method)
@@ -68,8 +168,7 @@ Image convolutionOnDevice(const Image &img, const std::vector<float> &mask, Conv
         
         case ConvMethod::Tiled:
         {
-            // size_t tile_size = blockSize+mask.size();
-            // tiledConvolution2D<<<numBlocks, blockSize>>>(d_output, d_img, width, height, maskSize);
+            tiledConvolution2D<<<grid, block>>>(d_output, d_img, width, height, maskSize);
             break;
         }
 
