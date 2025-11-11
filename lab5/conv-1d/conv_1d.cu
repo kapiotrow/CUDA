@@ -2,6 +2,8 @@
 
 __constant__ float c_mask[MAX_MASK_WIDTH];
 
+#define BLOCK_SIZE 32u
+
 __global__ void conv1dBasicKernel(float *output, const float *signal, const float *mask, const int width, const int maskWidth)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
@@ -12,17 +14,51 @@ __global__ void conv1dBasicKernel(float *output, const float *signal, const floa
     {
         idx = (i - (maskWidth / 2) + j);
 
-        if (idx >= 0 || idx < width)
+        if (idx >= 0 && idx < width)
         {
             sum += signal[idx] * mask[j];
         }
     }
 
-    output[i] = sum;
+    if (i < width) output[i] = sum;
 }
 
 __global__ void conv1dTiledKernel(float *output, const float *signal, const int width, const int maskWidth)
 {
+    __shared__ float tileSignal[BLOCK_SIZE + MAX_MASK_WIDTH - 1];
+
+    int tx = threadIdx.x;
+    int i = blockIdx.x * BLOCK_SIZE + tx; // global index in signal
+    int halo = maskWidth / 2;
+
+    // Compute start index of the tile in the signal
+    int tileStart = blockIdx.x * BLOCK_SIZE - halo;
+
+    // Load data into shared memory (with zero padding)
+    if (tileStart + tx < 0 || tileStart + tx >= width)
+        tileSignal[tx] = 0.0f;
+    else
+        tileSignal[tx] = signal[tileStart + tx];
+
+    // Each block may need to load additional halo elements at the end
+    if (tx < maskWidth - 1) {
+        int extraIndex = tileStart + BLOCK_SIZE + tx;
+        if (extraIndex < 0 || extraIndex >= width)
+            tileSignal[BLOCK_SIZE + tx] = 0.0f;
+        else
+            tileSignal[BLOCK_SIZE + tx] = signal[extraIndex];
+    }
+
+    __syncthreads();
+
+    // Perform convolution
+    if (i < width) {
+        float sum = 0.0f;
+        for (int j = 0; j < maskWidth; j++) {
+            sum += tileSignal[tx + j] * c_mask[j];
+        }
+        output[i] = sum;
+    }
 }
 
 std::vector<float> convolutionOnDevice(const std::vector<float> &signal, const std::vector<float> &mask, ConvMethod method)
@@ -43,9 +79,10 @@ std::vector<float> convolutionOnDevice(const std::vector<float> &signal, const s
 
     cudaMemcpy(d_signal, signal.data(), signal.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_mask, mask.data(), mask.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(c_mask, mask.data(), mask.size() * sizeof(mask[0]));
 
-    int blockSize = 256;
-    int numBlocks = (signal.size() + blockSize - 1) / blockSize;
+    int blockSize = BLOCK_SIZE;
+    int numBlocks = (signal.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     switch (method)
     {
@@ -57,6 +94,8 @@ std::vector<float> convolutionOnDevice(const std::vector<float> &signal, const s
         
         case ConvMethod::Tiled:
         {
+            size_t tile_size = blockSize+mask.size();
+            conv1dTiledKernel<<<numBlocks, blockSize>>>(d_output, d_signal, signal.size(), mask.size());
             break;
         }
 
