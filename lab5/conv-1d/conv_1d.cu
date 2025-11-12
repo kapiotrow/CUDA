@@ -28,7 +28,7 @@ __global__ void conv1dTiledKernel(float *output, const float *signal, const int 
     __shared__ float tileSignal[BLOCK_SIZE + MAX_MASK_WIDTH - 1];
 
     int tx = threadIdx.x;
-    int i = blockIdx.x * BLOCK_SIZE + tx; // global index in signal
+    int i = blockIdx.x * BLOCK_SIZE + tx;   // output index
     int halo = maskWidth / 2;
 
     // Compute start index of the tile in the signal

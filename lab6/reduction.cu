@@ -1,0 +1,99 @@
+#include "reduction.h"
+
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
+
+#include <stdio.h>
+
+namespace cg = cooperative_groups;
+
+__global__ void reductionKernelBasic(int *sum, int *input, int width)
+{
+    __shared__ int tile[BLOCK_SIZE];
+
+    int i = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+
+    if (i < width) tile[threadIdx.x] = input[i];
+
+    __syncthreads();
+
+    if (threadIdx.x % 2) return;
+
+    for (int idx = 1; idx < (min(BLOCK_SIZE, width) / 2) + 1; idx=(idx>>1))
+    {
+        if (threadIdx.x % (2 * idx)) return;
+        atomicAdd(&tile[threadIdx.x], tile[threadIdx.x + idx]);
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) atomicAdd(sum, tile[0]);
+}
+
+__global__ void reductionKernelOptimized(int *sum, int *input, int width)
+{
+}
+
+__global__ void reductionKernelCooperativeGroups(int *sum, const int *input, int width)
+{
+}
+
+
+int reductionOnDevice(const std::vector<int> &data, ReductionMethod method)
+{
+    int sum = 0;
+
+    int *d_data = nullptr;
+    int *d_sum = nullptr;
+
+    cudaMalloc((void **)&d_data, data.size() * sizeof(int));
+    cudaMalloc((void **)&d_sum, sizeof(int));
+
+    cudaMemcpy(d_data, data.data(), data.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+    int blockSize = BLOCK_SIZE;
+    int numBlocks = (data.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    switch (method)
+    {
+    case ReductionMethod::Basic:
+    {
+        reductionKernelBasic<<<numBlocks, blockSize>>>(d_sum, d_data, data.size());
+        break;
+    }
+
+    case ReductionMethod::Optimized:
+    {
+        break;
+    }
+
+    case ReductionMethod::CooperativeGroups:
+    {
+        break;
+    }
+    
+    default:
+    {
+        cudaFree(d_data);
+        throw std::runtime_error("Incorrect multiplication method, choose one of the followowing: Basic, Optimized, CooperativeGroup.");
+        break;
+    } 
+    }
+
+    cudaDeviceSynchronize();
+    cudaMemcpy(&sum, d_sum, sizeof(sum), cudaMemcpyDeviceToHost);
+
+    cudaFree(d_data);
+    cudaFree(d_sum);
+
+    return sum;
+}
+
+int reductionOnHost(const std::vector<int> &data)
+{
+    int sum = 0;
+    for (const auto &val : data)
+    {
+        sum += val;
+    }
+    return sum;
+}
