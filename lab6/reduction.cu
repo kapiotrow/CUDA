@@ -11,18 +11,20 @@ __global__ void reductionKernelBasic(int *sum, int *input, int width)
 {
     __shared__ int tile[BLOCK_SIZE];
 
-    int i = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i > width) return;
 
+    // load shared memory
     if (i < width) tile[threadIdx.x] = input[i];
+    else tile[threadIdx.x] = 0;
 
     __syncthreads();
 
-    if (threadIdx.x % 2) return;
-
-    for (int idx = 1; idx < (min(BLOCK_SIZE, width) / 2) + 1; idx=(idx>>1))
+    // perform reductio
+    for (int idx = 1; (1 << (idx - 1)) < BLOCK_SIZE; idx++)
     {
-        if (threadIdx.x % (2 * idx)) return;
-        atomicAdd(&tile[threadIdx.x], tile[threadIdx.x + idx]);
+        if (threadIdx.x % (1 << idx) == 0)
+            atomicAdd(&tile[threadIdx.x], tile[threadIdx.x + (1 << idx - 1)]);
         __syncthreads();
     }
 
@@ -31,6 +33,26 @@ __global__ void reductionKernelBasic(int *sum, int *input, int width)
 
 __global__ void reductionKernelOptimized(int *sum, int *input, int width)
 {
+    __shared__ int tile[BLOCK_SIZE];
+
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i > width) return;
+
+    // load shared memory
+    if (i < width) tile[threadIdx.x] = input[i];
+    else tile[threadIdx.x] = 0;
+
+    __syncthreads();
+
+    // perform reductio
+    for (int idx = 7; idx >= 0; idx--)
+    {
+        if (threadIdx.x < (1 << i))
+            atomicAdd(&tile[threadIdx.x], tile[threadIdx.x + (1 << idx)]);
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) atomicAdd(sum, tile[0]);
 }
 
 __global__ void reductionKernelCooperativeGroups(int *sum, const int *input, int width)
@@ -53,6 +75,8 @@ int reductionOnDevice(const std::vector<int> &data, ReductionMethod method)
     int blockSize = BLOCK_SIZE;
     int numBlocks = (data.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
+    if (numBlocks < 1) numBlocks = 1;
+
     switch (method)
     {
     case ReductionMethod::Basic:
@@ -63,6 +87,7 @@ int reductionOnDevice(const std::vector<int> &data, ReductionMethod method)
 
     case ReductionMethod::Optimized:
     {
+        reductionKernelOptimized<<<numBlocks, blockSize>>>(d_sum, d_data, data.size());
         break;
     }
 
