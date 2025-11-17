@@ -55,8 +55,47 @@ __global__ void reductionKernelOptimized(int *sum, int *input, int width)
     if (threadIdx.x == 0) atomicAdd(sum, tile[0]);
 }
 
+__device__ int blockReduceCG(cg::thread_group g, int *shared, int value)
+{
+    // thread id in group
+    unsigned int tid = g.thread_rank();
+    unsigned int gsize = g.size();
+
+    // load shared memory
+    shared[tid] = value;
+
+    g.sync();
+
+    // perform reduction
+    for (unsigned int stride = gsize >> 1; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+        {
+            shared[tid] += shared[tid + stride];
+        }
+
+        g.sync();
+    }
+
+    return shared[0];
+}
+
 __global__ void reductionKernelCooperativeGroups(int *sum, const int *input, int width)
 {
+    __shared__ int tile[BLOCK_SIZE];
+
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int inVal = (gid < width) ? input[gid] : 0;
+
+    cg::thread_block tb = cg::this_thread_block();
+
+    int blockSum = blockReduceCG(tb, tile, inVal);
+
+    if (threadIdx.x == 0)
+    {
+        atomicAdd(sum, blockSum);
+    }
 }
 
 
@@ -93,6 +132,7 @@ int reductionOnDevice(const std::vector<int> &data, ReductionMethod method)
 
     case ReductionMethod::CooperativeGroups:
     {
+        reductionKernelCooperativeGroups<<<numBlocks, blockSize>>>(d_sum, d_data, data.size());
         break;
     }
     
