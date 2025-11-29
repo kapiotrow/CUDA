@@ -1,68 +1,96 @@
 #include "scan.h"
 
-__global__ void kernelScan(int *out, const int *in, size_t n)
+__global__ void kernelScan(int *out, const int *in, int *blockSums, size_t n)
 {
     __shared__ int tile[BLOCK_SIZE];
 
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int buf = 0;
-    if (i > n) return;
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // load shared memory
-    if (i < n) tile[threadIdx.x] = in[i];
-    else tile[threadIdx.x] = 0;
-
+    // załaduj dane lub 0
+    tile[threadIdx.x] = (gid < n ? in[gid] : 0);
     __syncthreads();
 
-    // perform reduction
-    for (int idx = 1; (1 << (idx - 1)) < BLOCK_SIZE; idx++)
+    // Kogge–Stone
+    for (int offset = 1; offset < blockDim.x; offset <<= 1)
     {
-        if (threadIdx.x % (1 << idx) == 0)
-        {
-            atomicAdd(&tile[threadIdx.x], tile[threadIdx.x - (1 << idx - 1)]);
-            out[threadIdx.x] = tile[threadIdx.x];
-        }
+        int val = 0;
+        if (threadIdx.x >= offset)
+            val = tile[threadIdx.x - offset];
+
+        __syncthreads();
+        tile[threadIdx.x] += val;
         __syncthreads();
     }
 
-    if (threadIdx.x == BLOCK_SIZE)
-    {
-        atomicAdd(&out[BLOCK_SIZE], tile[BLOCK_SIZE]);
-    }
+    // zapis wyników
+    if (gid < n)
+        out[gid] = tile[threadIdx.x];
+
+    // zapis sumy bloku (ostatni wątek)
+    if (threadIdx.x == blockDim.x - 1)
+        blockSums[blockIdx.x] = tile[threadIdx.x];
 }
+
 
 __global__ void kernelAddSums(int *out, const int *sums, size_t n)
 {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
 
+    int add = sums[blockIdx.x];
+
+    out[gid] += add;
 }
+
 
 std::vector<int> scanOnDevice(const std::vector<int> &in, ScanMethod method)
 {
-    std::vector<int> out(in.size());
+    size_t n = in.size();
+    std::vector<int> out(n);
 
-    int *d_in = nullptr;
-    int *d_out = nullptr;
+    if (n == 0) return out;
 
-    cudaMalloc((void **)&d_in, in.size() * sizeof(int));
-    cudaMalloc((void **)&d_out, out.size() * sizeof(int));
+    int *d_in, *d_out, *d_sums;
 
-    cudaMemcpy(d_in, in.data(), in.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc((void**)&d_in,  n * sizeof(int));
+    cudaMalloc((void**)&d_out, n * sizeof(int));
 
-    int blockSize = BLOCK_SIZE;
-    int numBlocks = (in.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int numBlocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    cudaMalloc((void**)&d_sums, numBlocks * sizeof(int));
 
-    if (numBlocks < 1) numBlocks = 1;
+    cudaMemcpy(d_in, in.data(), n * sizeof(int), cudaMemcpyHostToDevice);
 
-    kernelScan<<<numBlocks, blockSize>>>(d_out, d_in, in.size());
-
+    // skan bloków
+    kernelScan<<<numBlocks, BLOCK_SIZE>>>(d_out, d_in, d_sums, n);
     cudaDeviceSynchronize();
-    cudaMemcpy(&out, d_out, out.size() * sizeof(out), cudaMemcpyDeviceToHost);
+
+    // skan tablicy sum bloków
+    std::vector<int> h_sums(numBlocks);
+    cudaMemcpy(h_sums.data(), d_sums, numBlocks * sizeof(int), cudaMemcpyDeviceToHost);
+
+    for (int i = 1; i < numBlocks; i++)
+        h_sums[i] += h_sums[i - 1];
+
+    // przesuniecie
+    h_sums.insert(h_sums.begin(), 0);  
+    h_sums.pop_back();
+
+    cudaMemcpy(d_sums, h_sums.data(), numBlocks * sizeof(int), cudaMemcpyHostToDevice);
+
+    // dodanie sum blokowych do każdego bloku
+    kernelAddSums<<<numBlocks, BLOCK_SIZE>>>(d_out, d_sums, n);
+    cudaDeviceSynchronize();
+
+    // kopiowanie wyników
+    cudaMemcpy(out.data(), d_out, n * sizeof(int), cudaMemcpyDeviceToHost);
 
     cudaFree(d_in);
     cudaFree(d_out);
+    cudaFree(d_sums);
 
     return out;
 }
+
 
 std::vector<int> scanOnHost(const std::vector<int> &in)
 {
