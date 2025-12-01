@@ -125,7 +125,9 @@ namespace bfs
 
             cudaMemcpy(&cTail, d_cFrontierTail, intBytes, cudaMemcpyDeviceToHost);
 
+            int *tmpFrpontier = d_pFrontier;
             d_pFrontier = d_cFrontier;
+            d_cFrontier = tmpFrpontier;
 
             cudaMemcpy(d_pFrontierTail, &cTail, intBytes, cudaMemcpyHostToDevice);
             int zero = 0;
